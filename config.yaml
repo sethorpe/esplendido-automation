@@ -1,0 +1,56 @@
+# =============================================================================
+# Esplendido Automation - Configuration
+# =============================================================================
+# Non-sensitive configuration values. Sensitive values belong in .env
+
+# -----------------------------------------------------------------------------
+# Gmail Search Configuration
+# -----------------------------------------------------------------------------
+gmail:
+  # Search queries to find utility invoices
+  # Uses Gmail's search syntax: https://support.google.com/mail/answer/7190
+  search_queries:
+    city_of_joburg: "from:noreply@joburg.org.za subject:statement has:attachment"
+    body_corporate: "from:accounts@bodycorop.co.za subject:levy statement has:attachment"
+  
+  # How many days back to search for invoices
+  search_days_back: 30
+  
+  # Maximum number of emails to process per query
+  max_results: 5
+
+# -----------------------------------------------------------------------------
+# PDF Extraction Configuration
+# -----------------------------------------------------------------------------
+extraction:
+  # Claude model to use for PDF extraction
+  model: "claude-sonnet-4-20250514"
+  
+  # Maximum tokens for extraction response
+  max_tokens: 1024
+
+# -----------------------------------------------------------------------------
+# RentBook Configuration
+# -----------------------------------------------------------------------------
+rentbook:
+  base_url: "https://app.rentbook.co.za"
+  
+  # Property and tenant identifiers (from RentBook URL patterns)
+  property_id: "your-property-id"
+  tenant_id: "your-tenant-id"
+  
+  # Invoice line item descriptions
+  line_items:
+    refuse: "Municipal Refuse"
+    water: "Water (Body Corporate)"
+    electricity: "Electricity (Body Corporate)"
+
+# -----------------------------------------------------------------------------
+# Rental Configuration
+# -----------------------------------------------------------------------------
+rental:
+  # Monthly base rent amount in ZAR
+  base_rent: 8500.00
+  
+  # Due date for rent payment (day of month)
+  due_day: 1
