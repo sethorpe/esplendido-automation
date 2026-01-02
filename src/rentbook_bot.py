@@ -17,6 +17,10 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from src.logger_config import setup_logger
+
+log = setup_logger(__name__)
+
 
 class RentBookAuthError(Exception):
     """Raised when RentBook authentication fails."""
@@ -29,9 +33,9 @@ class RentBookBot:
     repeated authentication flows.
     """
 
-    BASE_URL = "https://app.rentbook.co.za"
-    LOGIN_URL = "https://app.rentbook.co.za/login"
-    DASHBOARD_URL = "https://app.rentbook.co.za/dashboard"
+    BASE_URL = "https://rentbook.co.za"
+    LOGIN_URL = "https://rentbook.cloud.mrisoftware.com/Account/Login"
+    DASHBOARD_URL = "https://rentbook.cloud.mrisoftware.com"
 
     EMAIL_INPUT = 'input[name="email"], input[type="email"], #email'
     PASSWORD_INPUT = 'input[name="password"], input[type="password"], #password'
@@ -85,6 +89,7 @@ class RentBookBot:
 
     async def start(self) -> None:
         """Start the browser and create a new context."""
+        log.info(f"Starting browser (headless={self.headless})")
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=self.headless)
 
@@ -95,9 +100,11 @@ class RentBookBot:
         self._context.set_default_timeout(self.action_timeout)
 
         self._page = await self._context.new_page()
+        log.debug("Browser context and page created")
 
     async def stop(self) -> None:
         """Stop the browser and clean up resources."""
+        log.debug("Stopping browser and cleaning up resources")
         if self._page:
             await self._page.close()
             self._page = None
@@ -110,6 +117,7 @@ class RentBookBot:
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
+        log.info("Browser stopped and resources cleaned up")
 
     async def __aenter__(self) -> "RentBookBot":
         """Async context manager entry."""
@@ -159,21 +167,26 @@ class RentBookBot:
         Raises:
             RentBookAuthError: If login fails.
         """
+        log.info("Attempting to log in to RentBook")
         await self.page.goto(self.LOGIN_URL, wait_until="networkidle")
 
         try:
+            log.debug("Locating login form fields")
             email_input = await self.page.wait_for_selector(
                 self.EMAIL_INPUT, timeout=10000
             )
             if email_input:
+                log.debug("Filling email field")
                 await email_input.fill(self.email)
 
             password_input = await self.page.wait_for_selector(
                 self.PASSWORD_INPUT, timeout=5000
             )
             if password_input:
+                log.debug("Filling password field")
                 await password_input.fill(self.password)
         except PlaywrightTimeoutError:
+            log.error("Could not find login form fields on RentBook login page")
             raise RentBookAuthError(
                 "Could not find login form fields on RentBook login page"
             )
@@ -183,12 +196,14 @@ class RentBookBot:
                 self.LOGIN_BUTTON, timeout=5000
             )
             if login_button:
+                log.debug("Clicking login button")
                 await login_button.click()
         except PlaywrightTimeoutError:
+            log.error("Could not find login button")
             raise RentBookAuthError("Could not find login button")
 
         try:
-            await self.page.wait_for_url(f"{self.BASE_URL}/**", timeout=15000)
+            await self.page.wait_for_url(f"{self.DASHBOARD_URL}", timeout=15000)
         except PlaywrightTimeoutError:
             raise RentBookAuthError(
                 "Login failed - did not redirect after submitting credentials"
@@ -199,7 +214,7 @@ class RentBookBot:
             ".alert-danger",
             '[role="alert"]',
             ':has-text("Invalid credentials")',
-            '"has-text("incorrect password")',
+            ':has-text("incorrect password")',
         ]
         for selector in error_selectors:
             try:
@@ -211,13 +226,16 @@ class RentBookBot:
                 continue
 
         if await self.is_logged_in():
+            log.info("Successfully logged in to RentBook")
             return True
 
         if "login" in self.page.url.lower():
+            log.error("Login failed - still on login page after submission")
             raise RentBookAuthError(
                 "Login failed = still on login page after submission"
             )
 
+        log.info("Login successful")
         return True
 
     async def authenticate(self) -> bool:
@@ -231,11 +249,14 @@ class RentBookBot:
         Raises:
             RentBookAuthError: If authentication fails.
         """
+        log.info("Authenticating with RentBook")
         await self.page.goto(self.DASHBOARD_URL, wait_until="networkidle")
 
         if await self.is_logged_in():
+            log.info("Already authenticated - session is valid")
             return True
 
+        log.info("Not logged in - initiating login flow")
         return await self.login()
 
     async def navigate_to_dashboard(self) -> None:

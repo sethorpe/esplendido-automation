@@ -24,7 +24,7 @@ gmail:
 # -----------------------------------------------------------------------------
 extraction:
   # Claude model to use for PDF extraction
-  model: "claude-sonnet-4-20250514"
+  model: "claude-sonnet-4-20250929"
   
   # Maximum tokens for extraction response
   max_tokens: 1024
@@ -33,8 +33,11 @@ extraction:
 # RentBook Configuration
 # -----------------------------------------------------------------------------
 rentbook:
-  base_url: "https://app.rentbook.co.za"
+  base_url: "https://rentbook.co.za"
   
+  # Browser automation settings
+  headless: false # Set to true to hide browser
+
   # Property and tenant identifiers (from RentBook URL patterns)
   property_id: "your-property-id"
   tenant_id: "your-tenant-id"

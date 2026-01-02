@@ -6,13 +6,17 @@ Uses App Password authentication for hands-oiff automation.
 """
 
 import imaplib
-import email
+import email.message
 from datetime import datetime
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
+
+from src.logger_config import setup_logger
+
+log = setup_logger(__name__)
 
 
 class EmailAttachment(BaseModel):
@@ -62,16 +66,21 @@ class GmailClient:
         Raises:
             imaplib.IMAP.error: If authentication fails.
         """
+        log.info(f"Connecting to Gmail IMAP server: {self.IMAP_SERVER}:{self.IMAP_PORT}")
         self._connection = imaplib.IMAP4_SSL(self.IMAP_SERVER, self.IMAP_PORT)
+        log.debug(f"Authenticating as {self.email_address}")
         self._connection.login(self.email_address, self.app_password)
+        log.info("Successfully connected and authenticated to Gmail")
 
     def disconnect(self) -> None:
         """Close the IMAP connection."""
         if self._connection:
             try:
+                log.debug("Disconnecting from Gmail IMAP server")
                 self._connection.logout()
-            except Exception:
-                pass
+                log.info("Disconnected from Gmail")
+            except Exception as e:
+                log.warning(f"Error during disconnect: {e}")
             self._connection = None
 
     def __enter__(self) -> "GmailClient":
@@ -204,16 +213,20 @@ class GmailClient:
         Returns:
             List of message IDs (as bytes)
         """
+        log.debug(f"Searching {mailbox} for emails from {sender}")
         self.connection.select(mailbox, readonly=True)
 
         criteria = self._build_search_criteria(sender, subject_contains, after_date)
+        log.debug(f"Search criteria: {criteria}")
         _, message_numbers = self.connection.search(None, criteria)
 
         # message_numbers is a list with one element: space-separated IDs
         if not message_numbers[0]:
+            log.info(f"No emails found matching criteria")
             return []
 
         message_ids = message_numbers[0].split()
+        log.info(f"Found {len(message_ids)} email(s) matching criteria")
 
         # Return most recent first, limited to max_results
         return message_ids[-max_results:][::-1]
@@ -250,6 +263,7 @@ class GmailClient:
         Returns:
             List of EmailAttachment objects containing PDF data
         """
+        log.info(f"Fetching PDF attachments from {sender}")
         message_ids = self.search_emails(
             sender=sender,
             subject_contains=subject_contains,
@@ -268,9 +282,12 @@ class GmailClient:
             email_sender = self._decode_header_value(msg.get("From"))
 
             # Extract attachments from message parts
-            attachments.extend(
-                self._extract_attachments(msg, email_subject, email_date, email_sender)
-            )
+            msg_attachments = self._extract_attachments(msg, email_subject, email_date, email_sender)
+            if msg_attachments:
+                log.debug(f"Found {len(msg_attachments)} PDF(s) in email: {email_subject}")
+            attachments.extend(msg_attachments)
+
+        log.info(f"Retrieved {len(attachments)} total PDF attachment(s)")
         return attachments
 
 
