@@ -15,6 +15,10 @@ from typing import Optional
 import anthropic
 from pydantic import BaseModel, Field
 
+from src.logger_config import setup_logger
+
+log = setup_logger(__name__)
+
 
 # -----------------------------------------------------------------------------
 # Filename Patterns for Invoice PDFs
@@ -141,11 +145,14 @@ class PDFExtractor:
         """
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         if not self.api_key:
+            log.error("Anthropic API key not found")
             raise ValueError(
                 "Anthropic API key required. Set ANTHROPIC_API_KEY environment "
                 "variable or pass api_key parameter."
             )
+        log.debug("Initializing Anthropic client")
         self.client = anthropic.Anthropic(api_key=self.api_key)
+        log.info(f"PDF Extractor initialized with model: {self.MODEL}")
 
     def _encode_pdf(self, pdf_content: bytes) -> str:
         """Encode PDF bytes to base64 string."""
@@ -200,9 +207,11 @@ class PDFExtractor:
             ExtractionResult with extracted data or error information
         """
         try:
+            log.info(f"Extracting data from {invoice_type.value} invoice PDF")
             pdf_base64 = self._encode_pdf(pdf_content)
             prompt = self._build_extraction_prompt(invoice_type)
 
+            log.debug(f"Calling Claude API with model {self.MODEL}")
             message = self.client.messages.create(
                 model=self.MODEL,
                 max_tokens=1024,
@@ -228,14 +237,24 @@ class PDFExtractor:
             )
 
             raw_response = message.content[0].text
-            return self._parse_response(raw_response, invoice_type)
+            log.debug(f"Received response from Claude API")
+            result = self._parse_response(raw_response, invoice_type)
+
+            if result.success:
+                log.info(f"Successfully extracted data from {invoice_type.value} invoice")
+            else:
+                log.warning(f"Extraction failed for {invoice_type.value}: {result.error_message}")
+
+            return result
         except anthropic.APIError as e:
+            log.error(f"Anthropic API error during extraction: {e}")
             return ExtractionResult(
                 success=False,
                 invoice_type=invoice_type,
                 error_message=f"Anthropic API error: {e}",
             )
         except Exception as e:
+            log.exception(f"Unexpected error during extraction: {e}")
             return ExtractionResult(
                 success=False,
                 invoice_type=invoice_type,
