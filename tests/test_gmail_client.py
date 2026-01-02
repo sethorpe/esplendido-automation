@@ -1,228 +1,326 @@
-"""Tests for the Gmail client module"""
+"""Tests for the Gmail client module (IMAP implementation)."""
 
-import base64
+import imaplib
 from datetime import datetime
-from pathlib import Path
+from email.message import EmailMessage
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.gmail_client import EmailAttachment, GmailClient
-
-
-@pytest.fixture
-def mock_credentials():
-    """Create mock credentials"""
-    creds = MagicMock()
-    creds.valid = True
-    creds.expired = False
-    return creds
-
-
-@pytest.fixture
-def gmail_client(tmp_path):
-    """Create a GmailClient instance with temporary paths."""
-    credentials_path = tmp_path / "credentials.json"
-    token_path = tmp_path / "token.pickle"
-    return GmailClient(credentials_path, token_path)
+from src.gmail_client import EmailAttachment, GmailClient, fetch_utility_pdfs
 
 
 class TestGmailClientInit:
     """Tests for GmailClient initialization."""
 
-    def test_init_sets_paths(self, tmp_path):
-        """Test that init properly sets credentials and token paths."""
-        creds = tmp_path / "creds.json"
-        token = tmp_path / "token.pickle"
-
-        client = GmailClient(creds, token)
-        assert client.credentials_path == creds
-        assert client.token_path == token
-        assert client._service is None
-
-    def test_service_raises_without_auth(self, gmail_client):
-        """Test that accessing service without auth raises error."""
-        with pytest.raises(RuntimeError, match="not authenticated"):
-            _ = gmail_client.service
-
-
-class TestGmailClientAuthentication:
-    """Test for OAuth authentication."""
-
-    @patch("src.gmail_client.build")
-    @patch("src.gmail_client.pickle")
-    def test_authenticate_loads_existing_valid_token(
-        self, mock_pickle, mock_build, gmail_client, mock_credentials, tmp_path
-    ):
-        """Test that valid cached tokens are loaded."""
-
-        token_path = tmp_path / "token.pickle"
-        token_path.write_bytes(b"dummy")
-        gmail_client.token_path = token_path
-
-        mock_pickle.load.return_value = mock_credentials
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-
-        gmail_client.authenticate()
-
-        assert gmail_client._service == mock_service
-        mock_build.assert_called_once_with("gmail", "v1", credentials=mock_credentials)
-
-    @patch("src.gmail_client.build")
-    @patch("src.gmail_client.pickle")
-    @patch("src.gmail_client.Request")
-    def test_authenticate_refreshes_expired_token(
-        self, mock_request, mock_pickle, mock_build, gmail_client, tmp_path
-    ):
-        """Test that expired tokens are refreshed."""
-        token_path = tmp_path / "token.pickle"
-        token_path.write_bytes(b"dummy")
-        gmail_client.token_path = token_path
-
-        expired_creds = MagicMock()
-        expired_creds.valid = False
-        expired_creds.expired = True
-        expired_creds.refresh_token = "refresh_token"
-        mock_pickle.load.return_value = expired_creds
-
-        gmail_client.authenticate()
-
-        expired_creds.refresh.assert_called_once()
-
-    class TestEmailSearch:
-        """Tests for email search functionality."""
-
-    @patch("src.gmail_client.build")
-    def test_search_emails_builds_correct_query(self, mock_build, gmail_client):
-        """Test that search query is built correctly."""
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-        mock_list = mock_service.users().messages().list
-        mock_list.return_value.execute.return_value = {"messages": []}
-
-        gmail_client._service = mock_service
-
-        gmail_client.search_emails(
-            sender="test@example.com",
-            subject_contains="Invoice",
-            after_date=datetime(2024, 1, 15),
+    def test_init_sets_credentials(self):
+        """Test that init properly sets email and app password."""
+        client = GmailClient(
+            email_address="test@gmail.com",
+            app_password="abcdefghijklmnop",
         )
 
-        mock_list.assert_called_once()
-        call_kwargs = mock_list.call_args[1]
-        assert "from:test@example.com" in call_kwargs["q"]
-        assert "subject:Invoice" in call_kwargs["q"]
-        assert "after:2024/01/15" in call_kwargs["q"]
+        assert client.email_address == "test@gmail.com"
+        assert client.app_password == "abcdefghijklmnop"
+        assert client._connection is None
 
-    @patch("src.gmail_client.build")
-    def test_search_emails_returns_messages(self, mock_build, gmail_client):
-        """Test that search returns message list."""
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
+    def test_connection_raises_without_connect(self):
+        """Test that accessing connection without connecting raises error."""
+        client = GmailClient("test@gmail.com", "password")
 
-        expected_messages = [{"id": "123"}, {"id": "456"}]
-        mock_service.users().messages().list.return_value.execute.return_value = {
-            "messages": expected_messages
-        }
+        with pytest.raises(RuntimeError, match="Not connected"):
+            _ = client.connection
 
-        gmail_client._service = mock_service
-        result = gmail_client.search_emails(sender="test@example.com")
 
-        assert result == expected_messages
+class TestGmailClientConnection:
+    """Tests for IMAP connection management."""
 
-    @patch("src.gmail_client.build")
-    def test_search_emails_handles_no_results(self, mock_build, gmail_client):
-        """Test that search handles empty results gracefully."""
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-        mock_service.users().messages().list.return_value.execute.return_value = {}
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_connect_authenticates(self, mock_imap_class):
+        """Test that connect establishes IMAP connection."""
+        mock_imap = MagicMock()
+        mock_imap_class.return_value = mock_imap
 
-        gmail_client._service = mock_service
-        result = gmail_client.search_emails(sender="test@example.com")
+        client = GmailClient("test@gmail.com", "testpassword")
+        client.connect()
+
+        mock_imap_class.assert_called_once_with("imap.gmail.com", 993)
+        mock_imap.login.assert_called_once_with("test@gmail.com", "testpassword")
+        assert client._connection == mock_imap
+
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_disconnect_logs_out(self, mock_imap_class):
+        """Test that disconnect properly logs out."""
+        mock_imap = MagicMock()
+        mock_imap_class.return_value = mock_imap
+
+        client = GmailClient("test@gmail.com", "testpassword")
+        client.connect()
+        client.disconnect()
+
+        mock_imap.logout.assert_called_once()
+        assert client._connection is None
+
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_context_manager(self, mock_imap_class):
+        """Test context manager connects and disconnects."""
+        mock_imap = MagicMock()
+        mock_imap_class.return_value = mock_imap
+
+        with GmailClient("test@gmail.com", "testpassword") as client:
+            assert client._connection is not None
+
+        mock_imap.logout.assert_called_once()
+
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_connect_failure_raises(self, mock_imap_class):
+        """Test that authentication failure raises error."""
+        mock_imap = MagicMock()
+        mock_imap.login.side_effect = imaplib.IMAP4.error("LOGIN failed")
+        mock_imap_class.return_value = mock_imap
+
+        client = GmailClient("test@gmail.com", "wrongpassword")
+
+        with pytest.raises(imaplib.IMAP4.error):
+            client.connect()
+
+
+class TestSearchCriteria:
+    """Tests for IMAP search criteria building."""
+
+    def test_build_search_sender_only(self):
+        """Test search criteria with sender only."""
+        client = GmailClient("test@gmail.com", "password")
+        criteria = client._build_search_criteria(sender="sender@example.com")
+
+        assert criteria == 'FROM "sender@example.com"'
+
+    def test_build_search_with_subject(self):
+        """Test search criteria with subject filter."""
+        client = GmailClient("test@gmail.com", "password")
+        criteria = client._build_search_criteria(
+            sender="sender@example.com",
+            subject_contains="Invoice",
+        )
+
+        assert 'FROM "sender@example.com"' in criteria
+        assert 'SUBJECT "Invoice"' in criteria
+
+    def test_build_search_with_date(self):
+        """Test search criteria with date filter."""
+        client = GmailClient("test@gmail.com", "password")
+        criteria = client._build_search_criteria(
+            sender="sender@example.com",
+            after_date=datetime(2024, 12, 15),
+        )
+
+        assert 'FROM "sender@example.com"' in criteria
+        assert "SINCE 15-Dec-2024" in criteria
+
+    def test_build_search_all_filters(self):
+        """Test search criteria with all filters."""
+        client = GmailClient("test@gmail.com", "password")
+        criteria = client._build_search_criteria(
+            sender="sender@example.com",
+            subject_contains="Statement",
+            after_date=datetime(2024, 1, 1),
+        )
+
+        assert 'FROM "sender@example.com"' in criteria
+        assert 'SUBJECT "Statement"' in criteria
+        assert "SINCE 01-Jan-2024" in criteria
+
+
+class TestHeaderDecoding:
+    """Tests for email header decoding."""
+
+    def test_decode_plain_header(self):
+        """Test decoding a plain ASCII header."""
+        client = GmailClient("test@gmail.com", "password")
+        result = client._decode_header_value("Simple Subject")
+
+        assert result == "Simple Subject"
+
+    def test_decode_none_header(self):
+        """Test decoding None returns empty string."""
+        client = GmailClient("test@gmail.com", "password")
+        result = client._decode_header_value(None)
+
+        assert result == ""
+
+    def test_decode_empty_header(self):
+        """Test decoding empty string."""
+        client = GmailClient("test@gmail.com", "password")
+        result = client._decode_header_value("")
+
+        assert result == ""
+
+
+class TestEmailSearch:
+    """Tests for email search functionality."""
+
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_search_emails_returns_ids(self, mock_imap_class):
+        """Test that search_emails returns message IDs."""
+        mock_imap = MagicMock()
+        mock_imap.search.return_value = ("OK", [b"1 2 3"])
+        mock_imap_class.return_value = mock_imap
+
+        client = GmailClient("test@gmail.com", "password")
+        client.connect()
+        result = client.search_emails(sender="sender@example.com")
+
+        mock_imap.select.assert_called_with("INBOX", readonly=True)
+        assert result == [b"3", b"2", b"1"]  # Most recent first
+
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_search_emails_empty_result(self, mock_imap_class):
+        """Test search with no matching emails."""
+        mock_imap = MagicMock()
+        mock_imap.search.return_value = ("OK", [b""])
+        mock_imap_class.return_value = mock_imap
+
+        client = GmailClient("test@gmail.com", "password")
+        client.connect()
+        result = client.search_emails(sender="sender@example.com")
 
         assert result == []
 
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_search_emails_respects_max_results(self, mock_imap_class):
+        """Test that max_results limits returned IDs."""
+        mock_imap = MagicMock()
+        mock_imap.search.return_value = ("OK", [b"1 2 3 4 5 6 7 8 9 10"])
+        mock_imap_class.return_value = mock_imap
 
-class TestPdfAttachmentExtraction:
+        client = GmailClient("test@gmail.com", "password")
+        client.connect()
+        result = client.search_emails(sender="sender@example.com", max_results=3)
+
+        assert len(result) == 3
+        assert result == [b"10", b"9", b"8"]  # Most recent 3
+
+
+class TestPdfExtraction:
     """Tests for PDF attachment extraction."""
 
-    @patch("src.gmail_client.build")
-    def test_get_pdf_attachments_extracts_pdf(self, mock_build, gmail_client):
-        """Test that PDF attachments are correctly extracted."""
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-        gmail_client._service = mock_service
+    def _create_email_with_pdf(self, filename: str, content: bytes) -> EmailMessage:
+        """Helper to create an email with a PDF attachment."""
+        msg = EmailMessage()
+        msg["Subject"] = "Test Email"
+        msg["From"] = "sender@example.com"
+        msg["Date"] = "Mon, 15 Jan 2024 10:00:00 +0000"
+        msg.set_content("Email body")
+        msg.add_attachment(
+            content,
+            maintype="application",
+            subtype="pdf",
+            filename=filename,
+        )
+        return msg
 
-        # Mock search results
-        mock_service.users().messages().list.return_value.execute.return_value = {
-            "messages": [{"id": "msg123"}]
-        }
+    def test_extract_pdf_attachment(self):
+        """Test extracting a PDF attachment from email."""
+        client = GmailClient("test@gmail.com", "password")
+        msg = self._create_email_with_pdf("invoice.pdf", b"%PDF-1.4 content")
 
-        # Mock message details with PDF attachment
-        pdf_content = b"PDF content here"
-        encoded_pdf = base64.urlsafe_b64encode(pdf_content).decode()
-
-        mock_service.users().messages().get.return_value.execute.return_value = {
-            "payload": {
-                "headers": [
-                    {"name": "Subject", "value": "Your Invoice"},
-                    {"name": "From", "value": "sender@example.com"},
-                    {"name": "Date", "value": "Mon, 15 Jan 2024 10:00:00 +0000"},
-                ],
-                "parts": [
-                    {
-                        "filename": "invoice.pdf",
-                        "mimeType": "application/pdf",
-                        "body": {"attachmentId": "att123"},
-                    }
-                ],
-            }
-        }
-
-        # Mock attachment download
-        mock_service.users().messages().attachments().get.return_value.execute.return_value = {
-            "data": encoded_pdf
-        }
-
-        attachments = gmail_client.get_pdf_attachments(sender="sender@example.com")
+        attachments = client._extract_attachments(
+            msg,
+            email_subject="Test Email",
+            email_date=datetime(2024, 1, 15),
+            sender="sender@example.com",
+        )
 
         assert len(attachments) == 1
         assert attachments[0].filename == "invoice.pdf"
-        assert attachments[0].content == pdf_content
-        assert attachments[0].email_subject == "Your Invoice"
+        assert attachments[0].content == b"%PDF-1.4 content"
+        assert attachments[0].email_subject == "Test Email"
 
-    @patch("src.gmail_client.build")
-    def test_get_pdf_attachments_ignores_non_pdf(self, mock_build, gmail_client):
+    def test_extract_multiple_pdfs(self):
+        """Test extracting multiple PDF attachments."""
+        msg = EmailMessage()
+        msg["Subject"] = "Multiple PDFs"
+        msg["From"] = "sender@example.com"
+        msg["Date"] = "Mon, 15 Jan 2024 10:00:00 +0000"
+        msg.set_content("Email body")
+        msg.add_attachment(
+            b"PDF1", maintype="application", subtype="pdf", filename="first.pdf"
+        )
+        msg.add_attachment(
+            b"PDF2", maintype="application", subtype="pdf", filename="second.pdf"
+        )
+
+        client = GmailClient("test@gmail.com", "password")
+        attachments = client._extract_attachments(
+            msg,
+            email_subject="Multiple PDFs",
+            email_date=datetime(2024, 1, 15),
+            sender="sender@example.com",
+        )
+
+        assert len(attachments) == 2
+        filenames = [a.filename for a in attachments]
+        assert "first.pdf" in filenames
+        assert "second.pdf" in filenames
+
+    def test_extract_ignores_non_pdf(self):
         """Test that non-PDF attachments are ignored."""
-        mock_service = MagicMock()
-        mock_build.return_value = mock_service
-        gmail_client._service = mock_service
+        msg = EmailMessage()
+        msg["Subject"] = "Mixed Attachments"
+        msg["From"] = "sender@example.com"
+        msg["Date"] = "Mon, 15 Jan 2024 10:00:00 +0000"
+        msg.set_content("Email body")
+        msg.add_attachment(
+            b"PDF", maintype="application", subtype="pdf", filename="doc.pdf"
+        )
+        msg.add_attachment(
+            b"IMAGE", maintype="image", subtype="png", filename="image.png"
+        )
 
-        mock_service.users().messages().list.return_value.execute.return_value = {
-            "messages": [{"id": "msg123"}]
-        }
+        client = GmailClient("test@gmail.com", "password")
+        attachments = client._extract_attachments(
+            msg,
+            email_subject="Mixed Attachments",
+            email_date=datetime(2024, 1, 15),
+            sender="sender@example.com",
+        )
 
-        mock_service.users().messages().get.return_value.execute.return_value = {
-            "payload": {
-                "headers": [
-                    {"name": "Subject", "value": "Test"},
-                    {"name": "From", "value": "sender@example.com"},
-                    {"name": "Date", "value": "Mon, 15 Jan 2024 10:00:00 +0000"},
-                ],
-                "parts": [
-                    {
-                        "filename": "image.png",
-                        "mimeType": "image/png",
-                        "body": {"attachmentId": "att123"},
-                    }
-                ],
-            }
-        }
+        assert len(attachments) == 1
+        assert attachments[0].filename == "doc.pdf"
 
-        attachments = gmail_client.get_pdf_attachments(sender="sender@example.com")
 
-        assert len(attachments) == 0
+class TestGetPdfAttachments:
+    """Tests for the main get_pdf_attachments method."""
+
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_get_pdf_attachments_integration(self, mock_imap_class):
+        """Test full flow of getting PDF attachments."""
+        # Create a test email with PDF
+        msg = EmailMessage()
+        msg["Subject"] = "Your Invoice"
+        msg["From"] = "billing@example.com"
+        msg["Date"] = "Mon, 15 Jan 2024 10:00:00 +0000"
+        msg.set_content("Please find attached")
+        msg.add_attachment(
+            b"%PDF-1.4 invoice data",
+            maintype="application",
+            subtype="pdf",
+            filename="Invoice-INV12345.pdf",
+        )
+
+        mock_imap = MagicMock()
+        mock_imap.search.return_value = ("OK", [b"1"])
+        mock_imap.fetch.return_value = ("OK", [(b"1", msg.as_bytes())])
+        mock_imap_class.return_value = mock_imap
+
+        client = GmailClient("test@gmail.com", "password")
+        client.connect()
+        attachments = client.get_pdf_attachments(sender="billing@example.com")
+
+        assert len(attachments) == 1
+        assert attachments[0].filename == "Invoice-INV12345.pdf"
+        assert attachments[0].content == b"%PDF-1.4 invoice data"
+        assert attachments[0].email_subject == "Your Invoice"
 
 
 class TestEmailAttachmentModel:
@@ -242,3 +340,26 @@ class TestEmailAttachmentModel:
         assert attachment.content == b"PDF content"
         assert attachment.email_subject == "Test Subject"
         assert attachment.sender == "test@example.com"
+
+
+class TestFetchUtilityPdfs:
+    """Tests for the fetch_utility_pdfs convenience function."""
+
+    @patch("src.gmail_client.imaplib.IMAP4_SSL")
+    def test_fetch_utility_pdfs(self, mock_imap_class):
+        """Test fetching PDFs from multiple senders."""
+        mock_imap = MagicMock()
+        mock_imap.search.return_value = ("OK", [b""])
+        mock_imap_class.return_value = mock_imap
+
+        result = fetch_utility_pdfs(
+            email_address="test@gmail.com",
+            app_password="password",
+            city_sender="city@joburg.org.za",
+            body_corporate_sender="bc@example.com",
+        )
+
+        assert "city" in result
+        assert "body_corporate" in result
+        assert isinstance(result["city"], list)
+        assert isinstance(result["body_corporate"], list)

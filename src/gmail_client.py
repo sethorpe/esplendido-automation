@@ -1,23 +1,18 @@
 """
 Gmail Client Module
 
-Fetches utility emails and PDF attachments from Gmail using the Gmail API.
-Handles OAuth 2.0 authentication with offline access for token persistence.
+Fetches utility emails and PDF attachments from Gmail using IMAP.
+Uses App Password authentication for hands-oiff automation.
 """
 
-import base64
-import pickle
+import imaplib
+import email
 from datetime import datetime
-from pathlib import Path
+from email.header import decode_header
+from email.utils import parsedate_to_datetime
 from typing import Optional
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build, Resource
 from pydantic import BaseModel, ConfigDict
-
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 
 class EmailAttachment(BaseModel):
@@ -34,13 +29,15 @@ class EmailAttachment(BaseModel):
 
 class GmailClient:
     """
-    Client for fetching utility emaild and PDF attachments from Gmail.
+    Client for fetching utility emails and PDF attachments from Gmail.
 
-    Uses OAuth 2.0 with offline access for persistent authentication.
-    Tokens are cached locally to avoid repeated authorization flows.
+    Uses IMAP with App Password for authentication.
     """
 
-    def __init__(self, credentials_path: Path, token_path: Path):
+    IMAP_SERVER = "imap.gmail.com"
+    IMAP_PORT = 993
+
+    def __init__(self, email_address: str, app_password: str):
         """Initialize the Gmail client.
 
         Args:
@@ -48,54 +45,144 @@ class GmailClient:
                 (downloaded from Google Cloud Console)
             token_path: Path where the access/refresh token will be cached.
         """
-        self.credentials_path = Path(credentials_path)
-        self.token_path = Path(token_path)
-        self._service: Optional[Resource] = None
-
-    def authenticate(self) -> None:
-        """Authenticate with Gmail API using OAuth 2.0.
-
-        If a valid token exists, it will be loaded from cache.
-        If the token is expired, it will be refreshed.
-        If no token exists, the OAuth flow will be initiated (opens browser)
-        """
-        creds: Optional[Credentials] = None
-
-        # Load existing token if available
-        if self.token_path.exists():
-            with open(self.token_path, "rb") as token_file:
-                creds = pickle.load(token_file)
-
-        # Refresh or obtain new credentials if needed
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not self.credentials_path.exists():
-                    raise FileNotFoundError(
-                        f"Credentials file not found: {self.credentials_path}\n"
-                        "Download OAuth 2.0 credentials from Google Cloud Console"
-                    )
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    str(self.credentials_path), SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-
-            # Cache the token for future use
-            self.token_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.token_path, "wb") as token_file:
-                pickle.dump(creds, token_file)
-
-        self._service = build("gmail", "v1", credentials=creds)
+        self.email_address = email_address
+        self.app_password = app_password
+        self._connection: Optional[imaplib.IMAP4_SSL] = None
 
     @property
-    def service(self) -> Resource:
-        """Get the authenticated Gmail API service."""
-        if self._service is None:
-            raise RuntimeError(
-                "Gmail client not authenticated. Call authenticate() first."
-            )
-        return self._service
+    def connection(self) -> imaplib.IMAP4_SSL:
+        """Get the IMAP connection, raising if not connected."""
+        if self._connection is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+        return self._connection
+
+    def connect(self) -> None:
+        """Connect and authenticate to Gmail IMAP server.
+
+        Raises:
+            imaplib.IMAP.error: If authentication fails.
+        """
+        self._connection = imaplib.IMAP4_SSL(self.IMAP_SERVER, self.IMAP_PORT)
+        self._connection.login(self.email_address, self.app_password)
+
+    def disconnect(self) -> None:
+        """Close the IMAP connection."""
+        if self._connection:
+            try:
+                self._connection.logout()
+            except Exception:
+                pass
+            self._connection = None
+
+    def __enter__(self) -> "GmailClient":
+        """Context manager entry."""
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context mananger exit."""
+        self.disconnect()
+
+    def _build_search_criteria(
+        self,
+        sender: str,
+        subject_contains: Optional[str] = None,
+        after_date: Optional[datetime] = None,
+    ) -> str:
+        """Build IMAP search criteria string.
+
+        Args:
+            sender: Email address to search for
+            subject_contains: Optional subject filter
+            after_date: Optional date filter (emails after this date)
+
+        Returns:
+            IMAP search criteria string
+        """
+        criteria = [f'FROM "{sender}"']
+
+        if subject_contains:
+            criteria.append(f'SUBJECT "{subject_contains}"')
+
+        if after_date:
+            # IMAP date format: DD-MM-YYYY
+            date_str = after_date.strftime("%d-%b-%Y")
+            criteria.append(f"SINCE {date_str}")
+
+        return " ".join(criteria)
+
+    def _decode_header_value(self, value: Optional[str]) -> str:
+        """Decode an email header value that may be encoded."""
+        if not value:
+            return ""
+
+        decode_parts = decode_header(value)
+        result = []
+        for part, charset in decode_parts:
+            if isinstance(part, bytes):
+                result.append(part.decode(charset or "utf-8", errors="replace"))
+            else:
+                result.append(part)
+        return "".join(result)
+
+    def _parse_email_date(self, date_str: Optional[str]) -> datetime:
+        """Parse email date header into datetime."""
+        if date_str:
+            try:
+                return parsedate_to_datetime(date_str)
+            except (ValueError, TypeError):
+                pass
+        return datetime.now()
+
+    def _extract_attachments(
+        self,
+        msg: email.message.Message,
+        email_subject: str,
+        email_date: datetime,
+        sender: str,
+    ) -> list[EmailAttachment]:
+        """Extract PDF attachments from an email message.
+
+        Args:
+            msg: Parsed email message
+            email_subject: Subject line for metadata
+            email_date: Date for metadata
+            sender: Sender address for metadata
+
+        Returns:
+            List of EmailAttachment objects for PDF attachments
+        """
+        attachments = []
+
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition", ""))
+
+            # Check for PDF attachment
+            if content_type == "application/pdf" or (
+                "attachment" in content_disposition
+                and part.get_filename()
+                and part.get_filename().lower().endswith(".pdf")
+            ):
+                filename = part.get_filename()
+                if filename:
+                    # Decode filename if encoded
+                    filename = self._decode_header_value(filename)
+
+                    # Get attachment content
+                    content = part.get_payload(decode=True)
+                    if content:
+                        attachments.append(
+                            EmailAttachment(
+                                filename=filename,
+                                content=content,
+                                email_subject=email_subject,
+                                email_date=email_date,
+                                sender=sender,
+                            )
+                        )
+
+        return attachments
 
     def search_emails(
         self,
@@ -103,147 +190,56 @@ class GmailClient:
         subject_contains: Optional[str] = None,
         after_date: Optional[datetime] = None,
         max_results: int = 10,
-    ) -> list[dict]:
+        mailbox: str = "INBOX",
+    ) -> list[bytes]:
         """Search for emails matching the given criteria.
 
         Args:
-            sender: Email address of the sender to search for.
+            sender: Email address of the sender to search for
             subject_contains: Optional string that must appear in the subject
             after_date: Optional date to filter emails after
             max_results: Maximum number of emails to return
+            mailbox: Mailbox to search (default: INBOX)
 
         Returns:
-            List of email message metadata dictionaries
+            List of message IDs (as bytes)
         """
-        # Build Gmail search query
-        query_parts = [f"from:{sender}"]
+        self.connection.select(mailbox, readonly=True)
 
-        if subject_contains:
-            query_parts.append(f"subject:{subject_contains}")
+        criteria = self._build_search_criteria(sender, subject_contains, after_date)
+        _, message_numbers = self.connection.search(None, criteria)
 
-        if after_date:
-            date_str = after_date.strftime("%Y/%m/%d")
-            query_parts.append(f"after:{date_str}")
+        # message_numbers is a list with one element: space-separated IDs
+        if not message_numbers[0]:
+            return []
 
-        query = " ".join(query_parts)
+        message_ids = message_numbers[0].split()
 
-        # Execute search
-        results = (
-            self.service.users()  # type: ignore[attr-defined]
-            .messages()
-            .list(userId="me", q=query, maxResults=max_results)
-            .execute()
-        )
+        # Return most recent first, limited to max_results
+        return message_ids[-max_results:][::-1]
 
-        return results.get("messages", [])
-
-    def get_email_details(self, message_id: str) -> dict:
-        """Get full details of an email message.
+    def get_email(self, message_id: bytes) -> email.message.Message:
+        """Fetch and parse a complete email message.
 
         Args:
-            message_id: The Gmail message ID
+            message_id: The IMAP message ID
 
         Returns:
-            Full message data including headers and payload
+            Parsed email.message.Message object
         """
-        return (
-            self.service.users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute()
-        )
-
-    def _parse_email_date(self, headers: list[dict]) -> datetime:
-        """Extract and parse the date from email headers."""
-        for header in headers:
-            if header["name"].lower() == "date":
-                # Parse various email date formats
-                date_str = header["value"]
-                # Remove timezone name if present (e.g., "(PST)")
-                if "(" in date_str:
-                    date_str = date_str[: date_str.index("(")].strip()
-                # Try common formats
-                for fmt in [
-                    "%a, %d %b %Y %H:%M:%S %z",
-                    "%d %b %Y %H:%M:%S %z",
-                    "%a, %d %b %Y %H:%M:%S",
-                ]:
-                    try:
-                        return datetime.strptime(date_str, fmt)
-                    except ValueError:
-                        continue
-                # Fallback to current time if parsing fails
-                return datetime.now()
-        return datetime.now()
-
-    def _get_header_value(self, headers: list[dict], name: str) -> str:
-        """Get a specific header value from email headers."""
-        for header in headers:
-            if header["name"].lower() == name.lower():
-                return header["value"]
-        return ""
-
-    def _extract_attachments_from_parts(
-        self,
-        parts: list[dict],
-        message_id: str,
-        email_subject: str,
-        email_date: datetime,
-        sender: str,
-    ) -> list[EmailAttachment]:
-        """Recursively extract PDF attachments from message parts."""
-        attachments = []
-
-        for part in parts:
-            filename = part.get("filename", "")
-            mime_type = part.get("mimeType", "")
-
-            # Check for nested parts (multipart messages)
-            if "parts" in part:
-                attachments.extend(
-                    self._extract_attachments_from_parts(
-                        part["parts"], message_id, email_subject, email_date, sender
-                    )
-                )
-
-            # Check if this part is a PDF attachment
-            elif filename and mime_type == "application/pdf":
-                attachment_id = part["body"].get("attachmentId")
-
-                if attachment_id:
-                    # Fetch the attachment data
-                    attachment_data = (
-                        self.service.users()
-                        .messages()
-                        .attachments()
-                        .get(userId="me", messageId=message_id, id=attachment_id)
-                        .execute()
-                    )
-
-                    # Decode the base64 content
-                    content = base64.urlsafe_b64decode(attachment_data["data"])
-
-                    attachments.append(
-                        EmailAttachment(
-                            filename=filename,
-                            content=content,
-                            email_subject=email_subject,
-                            email_date=email_date,
-                            sender=sender,
-                        )
-                    )
-
-        return attachments
+        _, msg_data = self.connection.fetch(message_id, "(RFC822)")
+        email_body = msg_data[0][1]
+        return email.message_from_bytes(email_body)
 
     def get_pdf_attachments(
         self,
         sender: str,
         subject_contains: Optional[str] = None,
         after_date: Optional[datetime] = None,
-        max_results: int = 5,
+        max_results: int = 10,
     ) -> list[EmailAttachment]:
         """
-        Search for emails and extract PDF attachments.
+        Get PDF attachments from emails matching the search criteria.
 
         Args:
             sender: Email address of the sender to search for
@@ -254,8 +250,7 @@ class GmailClient:
         Returns:
             List of EmailAttachment objects containing PDF data
         """
-        # Search for matching emails
-        messages = self.search_emails(
+        message_ids = self.search_emails(
             sender=sender,
             subject_contains=subject_contains,
             after_date=after_date,
@@ -264,49 +259,41 @@ class GmailClient:
 
         attachments = []
 
-        for msg in messages:
-            # Get full messsage details
-            message = self.get_email_details(msg["id"])
-            payload = message.get("payload", {})
-            headers = payload.get("headers", [])
+        for msg_id in message_ids:
+            msg = self.get_email(msg_id)
 
-            # Extract email metadata
-            email_subject = self._get_header_value(headers, "subject")
-            email_date = self._parse_email_date(headers)
-            email_sender = self._get_header_value(headers, "from")
+            # Extract metadata
+            email_subject = self._decode_header_value(msg.get("Subject"))
+            email_date = self._parse_email_date(msg.get("Date"))
+            email_sender = self._decode_header_value(msg.get("From"))
 
             # Extract attachments from message parts
-            parts = payload.get("parts", [])
-            if parts:
-                attachments.extend(
-                    self._extract_attachments_from_parts(
-                        parts, msg["id"], email_subject, email_date, email_sender
-                    )
-                )
+            attachments.extend(
+                self._extract_attachments(msg, email_subject, email_date, email_sender)
+            )
         return attachments
 
-    def fetch_utility_pdfs(
-        credentials_path: Path,
-        token_path: Path,
-        city_sender: str,
-        body_corporate_sender: str,
-        after_date: Optional[datetime] = None,
-    ) -> dict[str, list[EmailAttachment]]:
-        """Convenience function to fetch utility PDFs from configured senders.
 
-        Args:
-            credentials_path: Path to OAuth credentials JSON
-            token_path: Path to token cache file
-            city_sender: Email address for City of Johannesburg
-            body_corporate_sender: Email address for Body Corporate
-            after_date: Optional date to filter emails after
+def fetch_utility_pdfs(
+    email_address: str,
+    app_password: str,
+    city_sender: str,
+    body_corporate_sender: str,
+    after_date: Optional[datetime] = None,
+) -> dict[str, list[EmailAttachment]]:
+    """Convenience function to fetch utility PDFs from configured senders.
 
-        Returns:
-            Dictionary with 'city' and 'body_corporate' keys containing attachments
-        """
-        client = GmailClient(credentials_path, token_path)
-        client.authenticate()
+    Args:
+        email_address: Gmail address
+        app_password: Google App Password
+        city_sender: Email address for City of Johannesburg
+        body_corporate_sender: Email address for Body Corporate
+        after_date: Optional date to filter emails after
 
+    Returns:
+        Dictionary with 'city' and 'body_corporate' keys containing attachments
+    """
+    with GmailClient(email_address, app_password) as client:
         return {
             "city": client.get_pdf_attachments(
                 sender=city_sender,
