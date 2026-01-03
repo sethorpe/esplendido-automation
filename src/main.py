@@ -64,6 +64,11 @@ class Config:
         self.rentbook_email = os.getenv("RENTBOOK_EMAIL")
         self.rentbook_password = os.getenv("RENTBOOK_PASSWORD")
 
+        self.city_sender_email = os.getenv("CITY_SENDER_EMAIL")
+        self.city_search_subject = os.getenv("CITY_SEARCH_SUBJECT")
+        self.body_corp_sender_email = os.getenv("BODY_CORP_SENDER_EMAIL")
+        self.body_corp_search_subject = os.getenv("BODY_CORP_SEARCH_SUBJECT")
+
         self._validate()
 
     def _validate(self):
@@ -80,6 +85,14 @@ class Config:
             missing.append("RENTBOOK_EMAIL")
         if not self.rentbook_password:
             missing.append("RENTBOOK_PASSWORD")
+        if not self.city_sender_email:
+            missing.append("CITY_SENDER_EMAIL")
+        if not self.city_search_subject:
+            missing.append("CITY_SEARCH_SUBJECT")
+        if not self.body_corp_sender_email:
+            missing.append("BODY_CORP_SENDER_EMAIL")
+        if not self.body_corp_search_subject:
+            missing.append("BODY_CORP_SEARCH_SUBJECT")
 
         if missing:
             raise ValueError(
@@ -124,8 +137,8 @@ def fetch_utility_pdfs(config: Config) -> dict[str, list[EmailAttachment]]:
 
     after_date = datetime.now() - timedelta(days=config.search_days_back)
 
-    city_query = config.gmail_config["search_queries"]["city_of_joburg"]
-    body_corp_query = config.gmail_config["search_queries"]["body_corporate"]
+    city_query = f"from:{config.city_sender_email} subject:{config.city_search_subject} has:attachment"
+    body_corp_query = f"from:{config.body_corp_sender_email} subject:{config.body_corp_search_subject} has:attachment"
 
     city_sender = city_query.split("from:")[1].split()[0]
     body_corp_sender = body_corp_query.split("from:")[1].split()[0]
@@ -342,10 +355,10 @@ async def async_main():
         attachments = fetch_utility_pdfs(config)
 
         # Step 2: Extract data from PDFs
-        invoice_data = extract_invoice_data(attachments, config)
+        # invoice_data = extract_invoice_data(attachments, config)
 
         # Step 3: Display Summary
-        display_invoice_summary(invoice_data)
+        # display_invoice_summary(invoice_data)
 
         # Step 4: Test RentBook Authentication
         await test_rentbook_authentication(config)
