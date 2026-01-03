@@ -209,22 +209,6 @@ class RentBookBot:
                 "Login failed - did not redirect after submitting credentials"
             )
 
-        error_selectors = [
-            ".error-message",
-            ".alert-danger",
-            '[role="alert"]',
-            ':has-text("Invalid credentials")',
-            ':has-text("incorrect password")',
-        ]
-        for selector in error_selectors:
-            try:
-                error = await self.page.wait_for_selector(selector, timeout=10000)
-                if error:
-                    error_text = await error.text_content()
-                    raise RentBookAuthError(f"Login failed: {error_text}")
-            except PlaywrightTimeoutError:
-                continue
-
         if await self.is_logged_in():
             log.info("Successfully logged in to RentBook")
             return True
