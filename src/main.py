@@ -69,6 +69,11 @@ class Config:
         self.body_corp_sender_email = os.getenv("BODY_CORP_SENDER_EMAIL")
         self.body_corp_search_subject = os.getenv("BODY_CORP_SEARCH_SUBJECT")
 
+        # Extraction mode (with env override)
+        self.extraction_mode = os.getenv(
+            "EXTRACTION_MODE", self.config.get("extraction", {}).get("mode", "local")
+        )
+
         self._validate()
 
     def _validate(self):
@@ -79,8 +84,11 @@ class Config:
             missing.append("GMAIL_ADDRESS")
         if not self.gmail_app_password:
             missing.append("GMAIL_APP_PASSWORD")
-        if not self.anthropic_api_key:
-            missing.append("ANTHROPIC_API_KEY")
+
+        # ANTHROPIC_API_KEY only required if using 'claude' extraction mode
+        if self.extraction_mode == "claude" and not self.anthropic_api_key:
+            missing.append("ANTHROPIC_API_KEY (required for 'claude' mode)")
+
         if not self.rentbook_email:
             missing.append("RENTBOOK_EMAIL")
         if not self.rentbook_password:
@@ -229,8 +237,10 @@ def extract_invoice_data(
         )
 
     # Now create extractor only after validation
-    log.info("Initializing PDF extractor with Claude API")
-    extractor = PDFExtractor(api_key=config.anthropic_api_key)
+    log.info(f"Initializing PDF extractor in {config.extraction_mode} mode")
+    extractor = PDFExtractor(
+        mode=config.extraction_mode, api_key=config.anthropic_api_key
+    )
 
     # Use the most recent PDF (first in list)
     city_pdf = city_pdfs[0]
@@ -355,10 +365,10 @@ async def async_main():
         attachments = fetch_utility_pdfs(config)
 
         # Step 2: Extract data from PDFs
-        # invoice_data = extract_invoice_data(attachments, config)
+        invoice_data = extract_invoice_data(attachments, config)
 
         # Step 3: Display Summary
-        # display_invoice_summary(invoice_data)
+        display_invoice_summary(invoice_data)
 
         # Step 4: Test RentBook Authentication
         await test_rentbook_authentication(config)
