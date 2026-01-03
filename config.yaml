@@ -23,6 +23,9 @@ gmail:
 # PDF Extraction Configuration
 # -----------------------------------------------------------------------------
 extraction:
+  # Extraction mode: 'local' (privacy-first, no external API) or 'claude' (LLM-based fallback)
+  mode: "local"
+
   # Claude model to use for PDF extraction
   model: "claude-sonnet-4-20250929"
   
