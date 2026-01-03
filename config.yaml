@@ -11,7 +11,7 @@ gmail:
   # Uses Gmail's search syntax: https://support.google.com/mail/answer/7190
   search_queries:
     city_of_joburg: "from:noreply@joburg.org.za subject:statement has:attachment"
-    body_corporate: "from:accounts@bodycorop.co.za subject:levy statement has:attachment"
+    body_corporate: "from:accounts@bodycorp.co.za subject:levy statement has:attachment"
   
   # How many days back to search for invoices
   search_days_back: 30
